@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Departures Board</title>
+
   <style>
     :root{
       --bg:#0b0b0b;
@@ -80,6 +81,7 @@
       font-size: 14px;
       letter-spacing:0.14em;
       text-transform:uppercase;
+      white-space:nowrap;
     }
     tbody td{
       padding: 12px 16px;
@@ -88,6 +90,7 @@
       white-space:nowrap;
     }
     tbody tr:last-child td{ border-bottom:0; }
+
     td.col-remarks{
       color:#eaeaea;
       font-weight:700;
@@ -105,6 +108,7 @@
     .status.cancelled{ color: var(--danger); border-color:#5a2222; }
     .status.delayed{ color: var(--warn); border-color:#5a4a22; }
     .status.ontime{ color: var(--ok); border-color:#235a23; }
+
     .footer{
       display:flex;
       justify-content:space-between;
@@ -120,9 +124,11 @@
       border-top:1px solid #2b2b2b;
       background:#140808;
       font-size: 14px;
+      display:none;
+      white-space:pre-wrap;
     }
 
-    /* ===== PANTALLA DE PUBLICIDAD ===== */
+    /* ===== ADS (SIN RECORTE) ===== */
     #adScreen{
       position: fixed;
       inset: 0;
@@ -133,13 +139,15 @@
     #adScreen img{
       width: 100vw;
       height: 100vh;
-      object-fit: cover; /* cambia a 'contain' si no quieres recorte */
+      object-fit: contain;   /* <- no recorta */
+      object-position: center;
+      background:#000;
     }
   </style>
 </head>
 
 <body>
-  <!-- Pantalla 1: Vuelos -->
+  <!-- Pantalla Tablero -->
   <div id="boardScreen">
     <div class="wrap">
       <div class="header">
@@ -166,213 +174,230 @@
           </thead>
           <tbody id="rows"></tbody>
         </table>
+
         <div class="footer">
           <div>Last update: <span id="lastUpdate">—</span></div>
           <div>Showing: <span id="count">0</span> flights</div>
         </div>
-        <div id="err" class="error" style="display:none;"></div>
+
+        <div id="err" class="error"></div>
       </div>
     </div>
   </div>
 
-  <!-- Pantalla 2/3: Publicidad -->
+  <!-- Pantalla Ads -->
   <div id="adScreen">
     <img id="adImage" alt="Publicidad" />
   </div>
 
-  <script>
-    // 1) LINK CSV PUBLICADO
-    const SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1QgLSEEkyRrwFcH3cYcnyDCD_-mYjRJRIGw_gQ9a-UVE/edit?gid=0#gid=0";
+<script>
+  // ========= CONFIG =========
+  const SHEET_CSV_URL =
+    "https://docs.google.com/spreadsheets/d/1QgLSEEkyRrwFcH3cYcnyDCD_-mYjRJRIGw_gQ9a-UVE/gviz/tq?tqx=out:csv&gid=0";
 
-    // 2) Ajusta cada cuánto refresca (segundos)
-    const REFRESH_SECONDS = 30;
+  const REFRESH_SECONDS = 30;   // refresco datos
+  const FILTER_TODAY = false;   // true = solo vuelos de hoy
 
-    // 3) Opcional: filtrar solo por la fecha de hoy (true/false)
-    const FILTER_TODAY = false;
+  // Carrusel: tablero 30s -> ad1 10s -> ad2 10s
+  const playlist = [
+    { type: "board", duration: 30000 },
+    { type: "ad", src: "ads/ad1.jpg", duration: 10000 },
+    { type: "ad", src: "ads/ad2.jpg", duration: 10000 },
+  ];
+  // ==========================
 
-    const elRows = document.getElementById("rows");
-    const elErr = document.getElementById("err");
-    const elLast = document.getElementById("lastUpdate");
-    const elCount = document.getElementById("count");
-    document.getElementById("refreshEvery").textContent = REFRESH_SECONDS;
+  const elRows = document.getElementById("rows");
+  const elErr = document.getElementById("err");
+  const elLast = document.getElementById("lastUpdate");
+  const elCount = document.getElementById("count");
+  document.getElementById("refreshEvery").textContent = REFRESH_SECONDS;
 
-    function tickClock(){
-      const d = new Date();
-      document.getElementById("now").textContent =
-        d.toLocaleString(undefined, { weekday:"short", year:"numeric", month:"short", day:"2-digit", hour:"2-digit", minute:"2-digit" });
-    }
-    setInterval(tickClock, 1000);
-    tickClock();
+  function tickClock(){
+    const d = new Date();
+    document.getElementById("now").textContent =
+      d.toLocaleString(undefined, {
+        weekday:"short", year:"numeric", month:"short", day:"2-digit",
+        hour:"2-digit", minute:"2-digit"
+      });
+  }
+  setInterval(tickClock, 1000);
+  tickClock();
 
-    function normalizeStatus(txt){
-      const t = (txt || "").toString().trim().toUpperCase();
-      if (t.includes("CANCEL")) return {cls:"cancelled", label:t};
-      if (t.includes("DELAY")) return {cls:"delayed", label:t};
-      if (t.includes("ON TIME") || t.includes("ONTIME")) return {cls:"ontime", label:t};
-      return {cls:"", label:t || "—"};
-    }
+  function normalizeStatus(txt){
+    const t = (txt || "").toString().trim().toUpperCase();
+    if (t.includes("CANCEL")) return {cls:"cancelled", label:t};
+    if (t.includes("DELAY")) return {cls:"delayed", label:t};
+    if (t.includes("ON TIME") || t.includes("ONTIME")) return {cls:"ontime", label:t};
+    return {cls:"", label:t || "—"};
+  }
 
-    // Parser CSV simple (soporta comillas)
-    function parseCSV(text){
-      const rows = [];
-      let row = [], cur = "", inQuotes = false;
+  // CSV parser (soporta comillas)
+  function parseCSV(text){
+    const rows = [];
+    let row = [], cur = "", inQuotes = false;
 
-      for (let i=0; i<text.length; i++){
-        const ch = text[i];
-        const next = text[i+1];
+    for (let i=0; i<text.length; i++){
+      const ch = text[i];
+      const next = text[i+1];
 
-        if (ch === '"' && inQuotes && next === '"'){
-          cur += '"'; i++;
-        } else if (ch === '"'){
-          inQuotes = !inQuotes;
-        } else if (ch === ',' && !inQuotes){
+      if (ch === '"' && inQuotes && next === '"'){ cur += '"'; i++; }
+      else if (ch === '"'){ inQuotes = !inQuotes; }
+      else if (ch === ',' && !inQuotes){ row.push(cur); cur = ""; }
+      else if ((ch === '\n' || ch === '\r') && !inQuotes){
+        if (cur.length || row.length){
           row.push(cur); cur = "";
-        } else if ((ch === '\n' || ch === '\r') && !inQuotes){
-          if (cur.length || row.length){
-            row.push(cur); cur = "";
-            if (ch === '\r' && next === '\n') i++;
-            rows.push(row);
-            row = [];
-          }
-        } else {
-          cur += ch;
+          if (ch === '\r' && next === '\n') i++;
+          rows.push(row);
+          row = [];
         }
+      } else cur += ch;
+    }
+    if (cur.length || row.length){ row.push(cur); rows.push(row); }
+    return rows;
+  }
+
+  function toISODateLocal(d){
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function safe(v){ return (v ?? "").toString().trim(); }
+
+  function render(flights){
+    elRows.innerHTML = "";
+    for (const f of flights){
+      const status = normalizeStatus(f.remarks);
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${safe(f.std) || "—"}</td>
+        <td>${safe(f.destination) || "—"}</td>
+        <td>${safe(f.flight) || "—"}</td>
+        <td>${safe(f.gate) || "—"}</td>
+        <td class="col-remarks"><span class="status ${status.cls}">${status.label}</span></td>
+      `;
+      elRows.appendChild(tr);
+    }
+    elCount.textContent = flights.length;
+  }
+
+  async function load(){
+    try{
+      elErr.style.display = "none";
+
+      const url = SHEET_CSV_URL + (SHEET_CSV_URL.includes("?") ? "&" : "?") + "t=" + Date.now();
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("No se pudo cargar el CSV: " + res.status);
+
+      const csvText = await res.text();
+
+      // si Google devuelve HTML (por permisos/link incorrecto)
+      const head = csvText.trim().slice(0, 20).toLowerCase();
+      if (head.startsWith("<!doctype") || head.startsWith("<html")){
+        throw new Error(
+          "Google devolvió HTML en vez de CSV.\n" +
+          "Solución: asegúrate de usar el link gviz (out:csv) y que el Sheet sea accesible con el vínculo."
+        );
       }
-      if (cur.length || row.length){
-        row.push(cur);
-        rows.push(row);
+
+      const data = parseCSV(csvText);
+      if (!data.length) throw new Error("CSV vacío.");
+
+      const headers = data[0].map(h => h.trim().toLowerCase());
+
+      const idx = (name) => headers.indexOf(name);
+
+      // acepta DATE o FECHA, etc.
+      const dateIdx = idx("date") !== -1 ? idx("date") : idx("fecha");
+      const stdIdx  = idx("std")  !== -1 ? idx("std")  : idx("hora") !== -1 ? idx("hora") : idx("hora de salida");
+      const destIdx = idx("destination") !== -1 ? idx("destination") : idx("destino");
+      const fltIdx  = idx("flight") !== -1 ? idx("flight") : idx("vuelo");
+      const gateIdx = idx("gate") !== -1 ? idx("gate") : idx("puerta");
+      const remIdx  = idx("remarks") !== -1 ? idx("remarks") : idx("estado");
+
+      // validación
+      const missing = [];
+      if (dateIdx === -1) missing.push("date");
+      if (stdIdx  === -1) missing.push("std");
+      if (destIdx === -1) missing.push("destination");
+      if (fltIdx  === -1) missing.push("flight");
+      if (gateIdx === -1) missing.push("gate");
+      if (remIdx  === -1) missing.push("remarks");
+
+      if (missing.length){
+        throw new Error(
+          `Faltan columnas: ${missing.join(", ")}\n` +
+          `Encabezados detectados: ${data[0].join(" | ")}\n` +
+          `TIP: la fila 1 debe tener cada encabezado en su propia celda (A1=DATE, B1=STD, etc).`
+        );
       }
-      return rows;
-    }
 
-    function toISODateLocal(d){
-      const y = d.getFullYear();
-      const m = String(d.getMonth()+1).padStart(2,"0");
-      const day = String(d.getDate()).padStart(2,"0");
-      return `${y}-${m}-${day}`;
-    }
+      const flights = data.slice(1)
+        .filter(r => r.some(c => (c||"").trim() !== ""))
+        .map(r => ({
+          date: r[dateIdx],
+          std: r[stdIdx],
+          destination: r[destIdx],
+          flight: r[fltIdx],
+          gate: r[gateIdx],
+          remarks: r[remIdx],
+        }));
 
-    function safe(v){ return (v ?? "").toString().trim(); }
+      const today = toISODateLocal(new Date());
+      const filtered = FILTER_TODAY ? flights.filter(f => safe(f.date) === today) : flights;
 
-    function sortByTime(a,b){
-      return safe(a.std).localeCompare(safe(b.std));
-    }
+      filtered.sort((a,b) => safe(a.std).localeCompare(safe(b.std)));
+      render(filtered);
 
-    function render(flights){
-      elRows.innerHTML = "";
-      for (const f of flights){
-        const status = normalizeStatus(f.remarks);
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${safe(f.std) || "—"}</td>
-          <td>${safe(f.destination) || "—"}</td>
-          <td>${safe(f.flight) || "—"}</td>
-          <td>${safe(f.gate) || "—"}</td>
-          <td class="col-remarks"><span class="status ${status.cls}">${status.label}</span></td>
-        `;
-        elRows.appendChild(tr);
+      elLast.textContent = new Date().toLocaleTimeString(undefined, {hour:"2-digit", minute:"2-digit", second:"2-digit"});
+
+      localStorage.setItem("lastFlights", JSON.stringify(filtered));
+      localStorage.setItem("lastUpdate", elLast.textContent);
+
+    } catch (e){
+      const saved = localStorage.getItem("lastFlights");
+      if (saved){
+        render(JSON.parse(saved));
+        elLast.textContent = localStorage.getItem("lastUpdate") || "—";
       }
-      elCount.textContent = flights.length;
+      elErr.textContent = "Error: " + (e?.message || e);
+      elErr.style.display = "block";
     }
+  }
 
-    async function load(){
-      try{
-        elErr.style.display = "none";
-        const url = SHEET_CSV_URL + (SHEET_CSV_URL.includes("?") ? "&" : "?") + "t=" + Date.now();
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("No se pudo cargar el CSV: " + res.status);
+  // ===== Carrusel =====
+  const boardScreen = document.getElementById("boardScreen");
+  const adScreen = document.getElementById("adScreen");
+  const adImage = document.getElementById("adImage");
+  let current = 0;
+  let timer = null;
 
-        const csvText = await res.text();
-        const data = parseCSV(csvText);
+  function showBoard(){
+    adScreen.style.display = "none";
+    boardScreen.style.display = "block";
+  }
+  function showAd(src){
+    boardScreen.style.display = "none";
+    adScreen.style.display = "block";
+    adImage.src = src;
+  }
+  function runPlaylist(){
+    if (timer) clearTimeout(timer);
+    const item = playlist[current];
+    if (item.type === "board") showBoard();
+    else showAd(item.src);
 
-        if (!data.length) throw new Error("CSV vacío.");
+    timer = setTimeout(() => {
+      current = (current + 1) % playlist.length;
+      runPlaylist();
+    }, item.duration);
+  }
 
-        const headers = data[0].map(h => h.trim().toLowerCase());
-        const idx = (name) => headers.indexOf(name);
-
-        const required = ["date","std","destination","flight","gate","remarks"];
-        for (const r of required){
-          if (idx(r) === -1) throw new Error(`Falta columna "${r}" en el Sheet.`);
-        }
-
-        const flights = data.slice(1)
-          .filter(r => r.some(c => (c||"").trim() !== ""))
-          .map(r => ({
-            date: r[idx("date")],
-            std: r[idx("std")],
-            destination: r[idx("destination")],
-            flight: r[idx("flight")],
-            gate: r[idx("gate")],
-            remarks: r[idx("remarks")],
-          }));
-
-        const today = toISODateLocal(new Date());
-        const filtered = FILTER_TODAY ? flights.filter(f => safe(f.date) === today) : flights;
-
-        filtered.sort(sortByTime);
-        render(filtered);
-
-        elLast.textContent = new Date().toLocaleTimeString(undefined, {hour:"2-digit", minute:"2-digit", second:"2-digit"});
-        localStorage.setItem("lastFlights", JSON.stringify(filtered));
-        localStorage.setItem("lastUpdate", elLast.textContent);
-
-      } catch (e){
-        const saved = localStorage.getItem("lastFlights");
-        if (saved){
-          render(JSON.parse(saved));
-          elLast.textContent = localStorage.getItem("lastUpdate") || "—";
-        }
-        elErr.textContent = "Error: " + (e?.message || e);
-        elErr.style.display = "block";
-      }
-    }
-
-    // ===== CARRUSEL DE PANTALLAS =====
-    const boardScreen = document.getElementById("boardScreen");
-    const adScreen = document.getElementById("adScreen");
-    const adImage = document.getElementById("adImage");
-
-    // Asegúrate que existan estos archivos:
-    // flight-board/ads/ad1.png
-    // flight-board/ads/ad2.png
-    const playlist = [
-      { type: "board", duration: 30000 },                // vuelos 30s
-      { type: "ad", src: "ads/ad1.jpg", duration: 10000 }, // publicidad 1 (10s)
-      { type: "ad", src: "ads/ad2.jpg", duration: 10000 }, // publicidad 2 (10s)
-    ];
-
-    let current = 0;
-    let timer = null;
-
-    function showBoard(){
-      adScreen.style.display = "none";
-      boardScreen.style.display = "block";
-    }
-
-    function showAd(src){
-      boardScreen.style.display = "none";
-      adScreen.style.display = "block";
-      adImage.src = src;
-    }
-
-    function runPlaylist(){
-      if (timer) clearTimeout(timer);
-
-      const item = playlist[current];
-      if (item.type === "board") showBoard();
-      else showAd(item.src);
-
-      timer = setTimeout(() => {
-        current = (current + 1) % playlist.length;
-        runPlaylist();
-      }, item.duration);
-    }
-
-    // Arranque
-    load();
-    setInterval(load, REFRESH_SECONDS * 1000);
-    runPlaylist();
-  </script>
+  // Arranque
+  load();
+  setInterval(load, REFRESH_SECONDS * 1000);
+  runPlaylist();
+</script>
 </body>
 </html>
-
